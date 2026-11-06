@@ -17,7 +17,15 @@ Start by asking Claude to **run the FlexSim smoke test**, or call `flexsim_check
 
 ## A call stops after about a minute, or says it was cancelled
 
-The Claude app may have stopped waiting, which also stops FlexSim. Raising `timeout_seconds` doesn't change this. See [Long runs](../README.md#long-runs).
+The Claude app stopped waiting, which also stops FlexSim. Raising `timeout_seconds` doesn't change this. Use `flexsim_start_run` instead of `flexsim_run_model`. See [Long runs](../README.md#long-runs).
+
+## "Background run … is running"
+
+FlexSim runs one at a time. Wait for the run with `flexsim_get_run`, or stop it with `flexsim_cancel_run`.
+
+## "No run with id …"
+
+Runs are kept only in the server's memory, so they're lost when the server restarts, and each Claude session can have its own server. Start the run again.
 
 ## "FlexSim did not finish within … s"
 

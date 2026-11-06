@@ -4,6 +4,17 @@ This project follows [Semantic Versioning](https://semver.org).
 
 ## Unreleased
 
+## 1.1.0 - 2026-11-06
+
+### Added
+
+- **Background runs, so long simulations survive client time limits.** `flexsim_start_run` returns at once, `flexsim_get_run` collects the results, and `flexsim_cancel_run` stops a run. Claude Desktop's Code tab was measured stopping calls somewhere between 50 and 90 seconds.
+
+### Changed
+
+- While a background run is going, direct FlexSim calls are refused at once with a clear message, rather than waiting behind it until the client gives up.
+- FlexSim is stopped when the client closes the connection or the server is asked to stop, rather than being left running.
+
 ## 1.0.1 - 2026-11-06
 
 The first published version, and the first that works with real FlexSim.

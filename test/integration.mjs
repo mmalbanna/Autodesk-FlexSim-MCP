@@ -94,11 +94,11 @@ const headlessRuns = () =>
 const c = await connect();
 const call = (name, args = {}, options = { timeout: 300000 }) => c.callTool({ name, arguments: args }, options);
 
-await step("lists all six tools, with honest annotations", async () => {
+await step("lists all the tools, with honest annotations", async () => {
   const { tools } = await c.listTools();
   assert.deepEqual(tools.map((t) => t.name).sort(), [
-    "flexsim_check_installation", "flexsim_list_models", "flexsim_open_in_gui",
-    "flexsim_read_table", "flexsim_run_model", "flexsim_run_script",
+    "flexsim_cancel_run", "flexsim_check_installation", "flexsim_get_run", "flexsim_list_models",
+    "flexsim_open_in_gui", "flexsim_read_table", "flexsim_run_model", "flexsim_run_script", "flexsim_start_run",
   ]);
   const hints = Object.fromEntries(tools.map((t) => [t.name, t.annotations]));
   for (const name of ["flexsim_run_model", "flexsim_run_script"]) assert.equal(hints[name].destructiveHint, true, name);
@@ -338,6 +338,66 @@ await step("run_model fails loudly when a text value doesn't fit the parameter",
   assert.match(r.structuredContent.error, /Unable to set Parameter1/);
 });
 
+// Every call in these steps uses the client library's default 60-second limit, like a real app.
+const pollRun = async (runId, label) => {
+  for (let i = 0; i < 12; i++) {
+    const r = await c.callTool({ name: "flexsim_get_run", arguments: { run_id: runId, wait_seconds: 30 } });
+    if (!["queued", "running"].includes(r.structuredContent.status)) return r;
+  }
+  throw new Error(`${label} did not finish`);
+};
+
+await step("a background run returns at once and delivers the same results", async () => {
+  const t0 = Date.now();
+  const started = ok(await c.callTool({ name: "flexsim_start_run", arguments: { model_path: fixture, run_time: 100, parameters: { Parameter1: 4 }, results_script: "return Model.parameters.Parameter1;" } }));
+  assert.ok(Date.now() - t0 < 3000, "start should not wait for FlexSim");
+  const s = ok(await pollRun(started.run_id, "the run"));
+  assert.equal(s.status, "succeeded");
+  assert.equal(Number(s.results), 4);
+  assert.ok(Object.keys(s.performance_measures ?? {}).length > 0);
+});
+
+await step("a background run outlasts the 60-second limit on a single call", async () => {
+  // The server stops this run at 75 s. Reaching that message proves it outlived every limit on a call.
+  const started = ok(await c.callTool({ name: "flexsim_start_run", arguments: { model_path: fixture, run_time: 100, setup_script: "while (1) { }", timeout_seconds: 75 } }));
+  const r = await pollRun(started.run_id, "the run");
+  assert.equal(r.isError, true);
+  assert.equal(r.structuredContent.status, "failed");
+  assert.match(r.structuredContent.error, /did not finish within 75 s/);
+  assert.equal(headlessRuns(), 0, "FlexSim is still running");
+  return `ended after ${r.structuredContent.elapsed_seconds} s`;
+});
+
+await step("a background run reports a bad parameter", async () => {
+  const started = ok(await c.callTool({ name: "flexsim_start_run", arguments: { model_path: fixture, run_time: 10, include_performance_measures: false, parameters: { NoSuchParameterXyz: 1 } } }));
+  const r = await pollRun(started.run_id, "the run");
+  assert.equal(r.isError, true);
+  assert.match(r.structuredContent.error, /NoSuchParameterXyz/);
+});
+
+await step("direct calls are refused at once during a background run, and cancel stops it", async () => {
+  const started = ok(await c.callTool({ name: "flexsim_start_run", arguments: { model_path: fixture, run_time: 100, setup_script: "while (1) { }", timeout_seconds: 300 } }));
+  const t0 = Date.now();
+  const busy = await c.callTool({ name: "flexsim_run_script", arguments: { script: "return 1;" } });
+  assert.equal(busy.isError, true);
+  assert.match(busy.structuredContent.error, /Background run/);
+  assert.ok(Date.now() - t0 < 3000);
+  await new Promise((resolve) => setTimeout(resolve, 8000));
+  assert.equal(headlessRuns(), 1, "FlexSim should be running");
+  const r = ok(await c.callTool({ name: "flexsim_cancel_run", arguments: { run_id: started.run_id } }));
+  assert.equal(r.status, "cancelled");
+  assert.equal(headlessRuns(), 0, "FlexSim is still running");
+});
+
+await step("two background runs go one at a time, in order", async () => {
+  const a = ok(await c.callTool({ name: "flexsim_start_run", arguments: { model_path: fixture, run_time: 10, include_performance_measures: false, results_script: "return 1;" } }));
+  const b = ok(await c.callTool({ name: "flexsim_start_run", arguments: { model_path: fixture, run_time: 10, include_performance_measures: false, results_script: "return 2;" } }));
+  const second = ok(await pollRun(b.run_id, "the second run"));
+  const first = ok(await c.callTool({ name: "flexsim_get_run", arguments: { run_id: a.run_id, wait_seconds: 0 } }));
+  assert.equal(first.results, 1);
+  assert.equal(second.results, 2);
+});
+
 await step("list_models finds the models", async () => {
   const s = ok(await call("flexsim_list_models", { folder: root }));
   assert.ok(s.models.some((m) => m.path === model), JSON.stringify(s));
@@ -363,6 +423,16 @@ await step("a work folder with a space and a hyphen works, and is left empty", a
   await c2.close();
   assert.equal(s.result, 7);
   assert.deepEqual(readdirSync(workDir), []);
+});
+
+await step("closing the connection during a background run stops FlexSim", async () => {
+  const c4 = await connect();
+  await c4.callTool({ name: "flexsim_start_run", arguments: { model_path: fixture, run_time: 100, setup_script: "while (1) { }", timeout_seconds: 300 } });
+  await new Promise((resolve) => setTimeout(resolve, 8000));
+  assert.equal(headlessRuns(), 1, "FlexSim should be running");
+  await c4.close();
+  await new Promise((resolve) => setTimeout(resolve, 5000));
+  assert.equal(headlessRuns(), 0, "FlexSim is still running");
 });
 
 if (openGui) {

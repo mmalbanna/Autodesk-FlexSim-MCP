@@ -20,7 +20,8 @@ npm test
 | --- | --- |
 | `src/index.ts` | MCP tool definitions |
 | `src/flexsim.ts` | Finding, launching and talking to FlexSim |
-| `test/unit.test.mjs` | Fast tests with no dependencies |
+| `src/jobs.ts` | Background run bookkeeping |
+| `test/unit.test.mjs`, `test/jobs.test.mjs` | Fast tests with no dependencies |
 | `test/smoke.mjs`, `test/fake-flexsim.mjs` | Protocol tests against a stand-in for FlexSim |
 | `test/integration.mjs` | End-to-end tests against real FlexSim |
 | `bundle/` | `manifest.json` and icon. `bundle/server/` is build output. |

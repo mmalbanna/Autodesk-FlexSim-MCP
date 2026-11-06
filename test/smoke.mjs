@@ -26,7 +26,7 @@ async function connect(mode) {
 }
 let c = await connect("ok");
 const { tools } = await c.listTools();
-assert.deepEqual(tools.map(t => t.name).sort(), ["flexsim_check_installation","flexsim_list_models","flexsim_open_in_gui","flexsim_read_table","flexsim_run_model","flexsim_run_script"]);
+assert.deepEqual(tools.map(t => t.name).sort(), ["flexsim_cancel_run","flexsim_check_installation","flexsim_get_run","flexsim_list_models","flexsim_open_in_gui","flexsim_read_table","flexsim_run_model","flexsim_run_script","flexsim_start_run"]);
 let r = await c.callTool({ name: "flexsim_check_installation", arguments: { smoke_test: true } });
 assert.ok(!r.isError, JSON.stringify(r.content)); assert.equal(r.structuredContent.smoke_test, "passed");
 r = await c.callTool({ name: "flexsim_run_model", arguments: { model_path: MODEL, run_time: 28800, parameters: { NumOperators: 4, Shift: "A \"day\"" }, results_script: 'return "x\\ny";' } });
@@ -49,7 +49,43 @@ r = await c.callTool({ name: "flexsim_run_script", arguments: { script: "does no
 assert.equal(r.isError, true, "a script that does not compile must be an error");
 assert.match(r.structuredContent.error, /could not compile your script/);
 assert.equal(r.structuredContent.result, null);
+// Background runs: start returns at once, get collects the same results as a direct run.
+r = await c.callTool({ name: "flexsim_start_run", arguments: { model_path: MODEL, run_time: 28800 } });
+assert.ok(!r.isError, JSON.stringify(r.content));
+const runId = r.structuredContent.run_id;
+r = await c.callTool({ name: "flexsim_get_run", arguments: { run_id: runId, wait_seconds: 20 } });
+assert.ok(!r.isError, JSON.stringify(r.content));
+assert.equal(r.structuredContent.status, "succeeded");
+assert.equal(r.structuredContent.run_end_time, 28800);
+assert.deepEqual(r.structuredContent.performance_measures, { Throughput: 123 });
+r = await c.callTool({ name: "flexsim_get_run", arguments: {} });
+assert.ok(r.structuredContent.runs.some((x) => x.run_id === runId));
+r = await c.callTool({ name: "flexsim_get_run", arguments: { run_id: "nosuchid" } });
+assert.equal(r.isError, true);
 await c.close();
+
+// A cancelled background run stops FlexSim. While one is going, direct calls are told so at once.
+c = await connect("hang");
+r = await c.callTool({ name: "flexsim_start_run", arguments: { model_path: MODEL, run_time: 10 } });
+const hanging = r.structuredContent.run_id;
+await new Promise((resolve) => setTimeout(resolve, 2000));
+r = await c.callTool({ name: "flexsim_get_run", arguments: { run_id: hanging, wait_seconds: 0 } });
+assert.equal(r.structuredContent.status, "running");
+r = await c.callTool({ name: "flexsim_run_script", arguments: { script: "return 1;" } });
+assert.equal(r.isError, true);
+assert.match(r.structuredContent.error, /Background run/);
+r = await c.callTool({ name: "flexsim_cancel_run", arguments: { run_id: hanging } });
+assert.equal(r.structuredContent.status, "cancelled");
+assertLastRunStopped();
+await c.close();
+
+// Closing the connection during a background run stops FlexSim too.
+c = await connect("hang");
+await c.callTool({ name: "flexsim_start_run", arguments: { model_path: MODEL, run_time: 10 } });
+await new Promise((resolve) => setTimeout(resolve, 2000));
+await c.close();
+await new Promise((resolve) => setTimeout(resolve, 1000));
+assertLastRunStopped();
 
 c = await connect("crash");
 r = await c.callTool({ name: "flexsim_run_script", arguments: { script: "return 1;" } });

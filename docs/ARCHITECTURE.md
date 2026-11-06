@@ -46,7 +46,7 @@ MCP hosts often start servers with a trimmed environment. With both variables mi
 
 ### The first run after a force-stopped FlexSim fails
 
-After a running FlexSim is killed, the next launch exits with code 0 and no results, about 48 seconds after the killed run began, however long you wait before launching it. A launch straight after that works. The cause is unknown. `runHeadless()` retries once in exactly this situation. A new server process doesn't know about an earlier kill, so it won't retry.
+After a running FlexSim is killed, the next launch can exit with code 0 and no results, about 48 seconds after the killed run began, however long you wait before launching it. It doesn't happen every time. A launch straight after that works. The cause is unknown. `runHeadless()` retries once in exactly this situation. A new server process doesn't know about an earlier kill, so it won't retry.
 
 ### `executestring()` returns 0 for code that doesn't compile
 
@@ -81,7 +81,11 @@ Parameter and Global Table names are case sensitive. Parameter values set before
 
 ## Client time limits
 
-The server has no way to outlast a client that stops waiting. The MCP client library's default request limit is 60 seconds, and a client that gives up sends `notifications/cancelled`, which stops FlexSim. The integration test sets a long client limit explicitly, so it doesn't reveal any limit in real apps. See the [roadmap](ROADMAP.md).
+A single call can't outlast a client that stops waiting. The MCP client library's default request limit is 60 seconds, and Claude Desktop's Code tab was measured stopping calls somewhere between 50 and 90 seconds. A client that gives up sends `notifications/cancelled`, which stops FlexSim.
+
+Background runs avoid this. `src/jobs.ts` keeps runs in the server's memory, independent of any call, and `flexsim_get_run` waits at most 45 seconds per call, safely under the limit. Direct calls are refused while a background run is going, because they would only wait in the queue until the client gave up.
+
+When the connection closes, the server stops FlexSim before exiting. A server that is killed outright can't do that, and any run in progress then finishes on its own.
 
 ## Testing layers
 

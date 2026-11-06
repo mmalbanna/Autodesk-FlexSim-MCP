@@ -19,7 +19,10 @@ Each run is one replication. If your model has randomness, a difference between 
 | Tool | What it does |
 | --- | --- |
 | `flexsim_check_installation` | Finds FlexSim installs and runs a headless smoke test. Start here if anything fails. |
-| `flexsim_run_model` | Runs a model to a stop time, with optional parameters, and returns performance measures and script results. |
+| `flexsim_run_model` | Runs a model to a stop time, with optional parameters, and returns performance measures and script results. For runs that finish in well under a minute. |
+| `flexsim_start_run` | Starts the same run in the background and returns at once. For anything longer. |
+| `flexsim_get_run` | Checks a background run, and returns its results when it finishes. |
+| `flexsim_cancel_run` | Stops a background run. |
 | `flexsim_run_script` | Runs any FlexScript, with or without a model. |
 | `flexsim_read_table` | Reads a Global Table without running the simulation. |
 | `flexsim_list_models` | Finds `.fsm` files in a folder. |
@@ -76,9 +79,13 @@ Ask Claude: **"Run the FlexSim smoke test."** You should get `smoke_test: passed
 
 ## Long runs
 
-The server's `timeout_seconds` (up to 7200) only controls when the server itself stops FlexSim. **The Claude app may stop waiting much sooner, and when it cancels a call, FlexSim is stopped too.** The client library's default is 60 seconds, and users have reported limits of about 60 seconds to 4 minutes in Claude Desktop. This project hasn't yet measured the limit in each app, and it plans [a way for runs to outlast a single call](docs/ROADMAP.md).
+**Claude apps stop waiting for a single call after a limit of their own, and when they cancel a call, FlexSim is stopped too.** In Claude Desktop's Code tab, that limit was measured somewhere between 50 and 90 seconds. Raising `timeout_seconds` doesn't change it, because that setting only controls when the server itself stops FlexSim.
 
-For now, keep each call short by shortening `run_time`, or use the Claude Code CLI, whose documentation describes much longer limits.
+So long simulations run in the background. `flexsim_start_run` returns straight away, and `flexsim_get_run` collects the results across as many calls as it takes, so just ask Claude to run the model and tell it the run may be long. A 94-second run was tested this way through the Code tab. A few things to know:
+
+- FlexSim runs one at a time. While a background run is going, other FlexSim calls are refused with a message saying so, and further `flexsim_start_run` calls wait in line.
+- Background runs have a default limit of one hour, and up to two hours with `timeout_seconds`.
+- A run belongs to its server, which usually means one Claude session. Quitting Claude stops FlexSim and loses the run, so results aren't kept.
 
 ## Settings
 
@@ -99,7 +106,8 @@ Leave `FLEXSIM_EXE` unset and the server moves to a new FlexSim version automati
 | Windows 11, Node.js 26 | As above |
 | Performance measures | Tested on a default measure only, not yet on one bound to live statistics |
 | Claude Code CLI | Connects |
-| Claude Desktop, Chat and Code tab | Not yet verified. Anthropic documents that the settings file feeds both. |
+| Claude Desktop, Code tab | Works through the settings file |
+| Claude Desktop, Chat | Not yet verified. Anthropic documents that the settings file feeds it too. |
 | Claude Desktop extension install, Cowork | Not yet verified. Reports welcome. |
 
 ## Security

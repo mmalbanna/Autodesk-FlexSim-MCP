@@ -5,7 +5,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod/v4";
 import { readdir, stat } from "node:fs/promises";
-import { extname, join } from "node:path";
+import { basename, extname, join } from "node:path";
 import {
   configuredExe,
   findInstallations,
@@ -14,12 +14,18 @@ import {
   openInGui,
   resolveExe,
   runHeadless,
+  stopActiveRunSync,
   type RunOutcome,
   type Step,
 } from "./flexsim.js";
+import { describeJob, JobManager, type JobOutcome } from "./jobs.js";
 
-const VERSION = "1.0.1";
+const VERSION = "1.1.0";
 const DEFAULT_TIMEOUT_S = Math.min(7200, Math.max(30, Number(process.env.FLEXSIM_TIMEOUT_SECONDS) || 600));
+// Background runs exist for long simulations, so a short default limit would defeat their purpose.
+const BACKGROUND_TIMEOUT_S = Math.max(DEFAULT_TIMEOUT_S, 3600);
+const MAX_WAIT_S = 45;
+const jobs = new JobManager();
 const CHARACTER_LIMIT = 40000;
 
 const timeoutField = z
@@ -28,7 +34,10 @@ const timeoutField = z
   .min(10)
   .max(7200)
   .optional()
-  .describe(`Seconds before the server stops FlexSim. Default ${DEFAULT_TIMEOUT_S}. The MCP client may stop waiting sooner, which also stops FlexSim.`);
+  .describe(
+    `Seconds before the server stops FlexSim. Default ${DEFAULT_TIMEOUT_S}, or ${BACKGROUND_TIMEOUT_S} for flexsim_start_run. ` +
+      "On a direct call, the MCP client may stop waiting sooner, which also stops FlexSim.",
+  );
 const modelPathField = z
   .string()
   .min(5)
@@ -96,6 +105,129 @@ function outcomePayload(o: RunOutcome, extra: Record<string, unknown> = {}) {
   };
 }
 
+const runModelInput = z.strictObject({
+  model_path: modelPathField,
+  run_time: z.number().positive().describe("Simulation stop time in model time units"),
+  parameters: z
+    .record(z.string().min(1), z.union([z.number(), z.string(), z.boolean()]))
+    .optional()
+    .describe("Model Parameter values by name, applied before reset"),
+  setup_script: z.string().max(20000).optional().describe("FlexScript run after reset, before the run"),
+  results_script: z.string().max(20000).optional().describe("FlexScript run after the run; its return value is reported"),
+  include_performance_measures: z.boolean().default(true).describe("Collect Performance Measure tables"),
+  timeout_seconds: timeoutField,
+});
+type RunModelRequest = z.infer<typeof runModelInput>;
+
+const RUN_MODEL_NOTES = `If a parameter cannot be applied, or a script raises an exception, the call fails, because the results may not reflect the requested scenario.
+Each call is one replication. For models with randomness, don't treat a difference between single runs as conclusive.
+Scripts are FlexScript bodies; end them with "return <value>;" using numbers, strings, Array or Map.
+
+Examples:
+  - Baseline run for 8 h (seconds model units): run_time=28800
+  - What-if: parameters={"NumOperators": 4, "ArrivalRate": 30}
+  - Custom output: results_script='Object s = Model.find("Sink1"); return s.stats.input.value;'`;
+
+function runModelSteps(a: RunModelRequest): Step[] {
+  const steps: Step[] = [];
+  if (a.parameters && Object.keys(a.parameters).length) {
+    const sets = Object.entries(a.parameters).map(([k, v]) => {
+      const val = typeof v === "string" ? fsLiteral(v) : typeof v === "boolean" ? (v ? "1" : "0") : fsNumber(v);
+      const name = fsLiteral(k);
+      return `if (Model.parameters[${name}]) Model.parameters[${name}].value = ${val}; else missing += ${fsLiteral(`${k}, `)};`;
+    });
+    steps.push({
+      key: "parameters_applied",
+      code: ['string missing = "";', ...sets, 'if (missing.length > 0) return "missing: " + missing;', 'return "ok";'].join("\n"),
+    });
+  }
+  steps.push({ key: "reset_done", code: "resetmodel();\nreturn 1;" });
+  if (a.setup_script) steps.push({ key: "setup_result", code: a.setup_script });
+  steps.push({
+    key: "run_end_time",
+    code: `stoptime(${fsNumber(a.run_time)});\nrunspeed(1000000000);\nrunfunction(1);\nreturn Model.time;`,
+  });
+  if (a.include_performance_measures) {
+    steps.push({
+      key: "performance_measures",
+      code: [
+        "Map m;",
+        'treenode tables = Model.find("Tools/PerformanceMeasureTables");',
+        "if (!tables) return m;",
+        "for (int k = 1; k <= tables.subnodes.length; k++) {",
+        '  Array pfms = function_s(tables.subnodes[k], "getAllPFMs");',
+        "  for (int i = 1; i <= pfms.length; i++) {",
+        "    treenode p = pfms[i];",
+        "    string name = p.up.first.value;",
+        "    m[name] = p.value;",
+        "  }",
+        "}",
+        "return m;",
+      ].join("\n"),
+    });
+  }
+  if (a.results_script) steps.push({ key: "results", code: a.results_script });
+  return steps;
+}
+
+/** Turn a finished model run into what the client sees, shared by the direct and background tools. */
+function runModelOutcome(o: RunOutcome, a: RunModelRequest): JobOutcome {
+  const hasParameters = !!a.parameters && Object.keys(a.parameters).length > 0;
+  const extra: Record<string, unknown> = { model_path: a.model_path, requested_run_time: a.run_time };
+  let failed = !o.ok;
+  if (o.ok) {
+    const t = Number(o.result?.model_time);
+    const applied = o.result?.parameters_applied;
+    // An exception raised during the run usually comes from the model's own logic, so the results are still reported.
+    const duringRun = o.threw?.find((f) => f.key === "run_end_time");
+    const parameterProblem = o.threw?.find((f) => f.key === "parameters_applied");
+    const notFound = typeof applied === "string" && applied.startsWith("missing: ");
+    const scenarioWrong = hasParameters && (applied !== "ok" || !!parameterProblem);
+    let error = compileError(o);
+    if (!error && scenarioWrong) {
+      // A what-if that silently used other values would look like a valid answer, so this is an error.
+      error =
+        "These results do NOT reflect the requested scenario. " +
+        (notFound
+          ? `Parameters not found in the model (${String(applied).replace(/^missing: /, "").replace(/, $/, "")}). Names are case sensitive.`
+          : (parameterProblem?.message ?? "Setting the parameters failed; see flexsim_console."));
+    }
+    error ??= exceptionError(o, ["run_end_time"]);
+    if (error) {
+      failed = true;
+      extra.ok = false;
+      extra.error = error;
+    }
+    const warnings: string[] = [];
+    if (duringRun) warnings.push(`An exception was raised during the run, so check the results: ${duringRun.message}`);
+    if (Number.isFinite(t) && t < a.run_time * 0.999) {
+      warnings.push(
+        `Model stopped at ${t}, before run_time ${a.run_time}. The model may have run out of events, have an earlier stop time, or the run did not complete.`,
+      );
+    }
+    if (warnings.length) extra.warning = warnings.join(" ");
+  }
+  return { payload: outcomePayload(o, extra), failed };
+}
+
+/**
+ * FlexSim runs one at a time. A direct call waiting behind a background run would only hit the client's
+ * time limit and fail with an unhelpful message, so it gets a useful one straight away.
+ */
+function busyReply() {
+  const pending = jobs.unfinished();
+  if (!pending.length) return undefined;
+  return reply(
+    {
+      ok: false,
+      error:
+        `Background run ${pending[0].id} (${pending[0].label}) is ${pending[0].status}, and FlexSim runs one at a time. ` +
+        "Wait for it with flexsim_get_run, or stop it with flexsim_cancel_run.",
+    },
+    true,
+  );
+}
+
 function createServer(): McpServer {
   const server = new McpServer({ name: "flexsim-mcp", version: VERSION });
 
@@ -124,6 +256,8 @@ Run this first whenever another FlexSim tool fails.`,
         default_timeout_seconds: DEFAULT_TIMEOUT_S,
       };
       if (!smoke_test) return reply(payload, !resolved.exe);
+      const busy = busyReply();
+      if (busy) return busy;
       const o = await runHeadless({
         steps: [{ key: "smoke", code: "return 1 + 1;" }],
         timeoutMs: 120000,
@@ -139,114 +273,114 @@ Run this first whenever another FlexSim tool fails.`,
     {
       title: "Run a FlexSim model",
       description: `Open a .fsm model headless, optionally set Model Parameters, reset, run to run_time, and return results.
+Use flexsim_start_run instead if the run might take more than about 30 seconds of real time: clients may stop waiting after about a minute, which also stops FlexSim.
 The server never saves the model file. Scripts you pass run with full FlexScript access, so they could.
 
 Returns model_time reached, all Performance Measures (if the model has any), and whatever results_script returns.
-If a parameter cannot be applied, or a script raises an exception, the call fails, because the results may not reflect the requested scenario.
-Each call is one replication. For models with randomness, don't treat a difference between single runs as conclusive.
-Scripts are FlexScript bodies; end them with "return <value>;" using numbers, strings, Array or Map.
-
-Examples:
-  - Baseline run for 8 h (seconds model units): run_time=28800
-  - What-if: parameters={"NumOperators": 4, "ArrivalRate": 30}
-  - Custom output: results_script='Object s = Model.find("Sink1"); return s.stats.input.value;'`,
-      inputSchema: z.strictObject({
-        model_path: modelPathField,
-        run_time: z.number().positive().describe("Simulation stop time in model time units"),
-        parameters: z
-          .record(z.string().min(1), z.union([z.number(), z.string(), z.boolean()]))
-          .optional()
-          .describe("Model Parameter values by name, applied before reset"),
-        setup_script: z.string().max(20000).optional().describe("FlexScript run after reset, before the run"),
-        results_script: z.string().max(20000).optional().describe("FlexScript run after the run; its return value is reported"),
-        include_performance_measures: z.boolean().default(true).describe("Collect Performance Measure tables"),
-        timeout_seconds: timeoutField,
-      }),
+${RUN_MODEL_NOTES}`,
+      inputSchema: runModelInput,
       // setup_script and results_script run arbitrary FlexScript, so this has the same power as flexsim_run_script.
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
     async (a, ctx) => {
-      const steps: Step[] = [];
-      const hasParameters = !!a.parameters && Object.keys(a.parameters).length > 0;
-      if (hasParameters) {
-        const sets = Object.entries(a.parameters!).map(([k, v]) => {
-          const val = typeof v === "string" ? fsLiteral(v) : typeof v === "boolean" ? (v ? "1" : "0") : fsNumber(v);
-          const name = fsLiteral(k);
-          return `if (Model.parameters[${name}]) Model.parameters[${name}].value = ${val}; else missing += ${fsLiteral(`${k}, `)};`;
-        });
-        steps.push({
-          key: "parameters_applied",
-          code: ['string missing = "";', ...sets, 'if (missing.length > 0) return "missing: " + missing;', 'return "ok";'].join("\n"),
-        });
-      }
-      steps.push({ key: "reset_done", code: "resetmodel();\nreturn 1;" });
-      if (a.setup_script) steps.push({ key: "setup_result", code: a.setup_script });
-      steps.push({
-        key: "run_end_time",
-        code: `stoptime(${fsNumber(a.run_time)});\nrunspeed(1000000000);\nrunfunction(1);\nreturn Model.time;`,
-      });
-      if (a.include_performance_measures) {
-        steps.push({
-          key: "performance_measures",
-          code: [
-            "Map m;",
-            'treenode tables = Model.find("Tools/PerformanceMeasureTables");',
-            "if (!tables) return m;",
-            "for (int k = 1; k <= tables.subnodes.length; k++) {",
-            '  Array pfms = function_s(tables.subnodes[k], "getAllPFMs");',
-            "  for (int i = 1; i <= pfms.length; i++) {",
-            "    treenode p = pfms[i];",
-            "    string name = p.up.first.value;",
-            "    m[name] = p.value;",
-            "  }",
-            "}",
-            "return m;",
-          ].join("\n"),
-        });
-      }
-      if (a.results_script) steps.push({ key: "results", code: a.results_script });
-
+      const busy = busyReply();
+      if (busy) return busy;
       const o = await runHeadless({
-        steps,
+        steps: runModelSteps(a),
         modelPath: a.model_path,
         timeoutMs: (a.timeout_seconds ?? DEFAULT_TIMEOUT_S) * 1000,
         signal: ctx.mcpReq.signal,
       });
-      const extra: Record<string, unknown> = { model_path: a.model_path, requested_run_time: a.run_time };
-      let failed = !o.ok;
-      if (o.ok) {
-        const t = Number(o.result?.model_time);
-        const applied = o.result?.parameters_applied;
-        // An exception raised during the run usually comes from the model's own logic, so the results are still reported.
-        const duringRun = o.threw?.find((f) => f.key === "run_end_time");
-        const parameterProblem = o.threw?.find((f) => f.key === "parameters_applied");
-        const notFound = typeof applied === "string" && applied.startsWith("missing: ");
-        const scenarioWrong = hasParameters && (applied !== "ok" || !!parameterProblem);
-        let error = compileError(o);
-        if (!error && scenarioWrong) {
-          // A what-if that silently used other values would look like a valid answer, so this is an error.
-          error =
-            "These results do NOT reflect the requested scenario. " +
-            (notFound
-              ? `Parameters not found in the model (${String(applied).replace(/^missing: /, "").replace(/, $/, "")}). Names are case sensitive.`
-              : (parameterProblem?.message ?? "Setting the parameters failed; see flexsim_console."));
-        }
-        error ??= exceptionError(o, ["run_end_time"]);
-        if (error) {
-          failed = true;
-          extra.ok = false;
-          extra.error = error;
-        }
-        const warnings: string[] = [];
-        if (duringRun) warnings.push(`An exception was raised during the run, so check the results: ${duringRun.message}`);
-        if (Number.isFinite(t) && t < a.run_time * 0.999) {
-          warnings.push(
-            `Model stopped at ${t}, before run_time ${a.run_time}. The model may have run out of events, have an earlier stop time, or the run did not complete.`,
-          );
-        }
-        if (warnings.length) extra.warning = warnings.join(" ");
+      const { payload, failed } = runModelOutcome(o, a);
+      return reply(payload, failed);
+    },
+  );
+
+  server.registerTool(
+    "flexsim_start_run",
+    {
+      title: "Start a FlexSim run in the background",
+      description: `Start the same run as flexsim_run_model, but return at once with a run_id instead of waiting. Then call flexsim_get_run to collect the results.
+Use this for any run that might take more than about 30 seconds of real time. It can outlast the time limit clients put on a single call.
+Runs go one at a time, in order. A run is stopped if the server shuts down, for example when Claude quits. Its default time limit is ${BACKGROUND_TIMEOUT_S} s.
+
+${RUN_MODEL_NOTES}`,
+      inputSchema: runModelInput,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    async (a) => {
+      const job = jobs.start(basename(a.model_path), async ({ signal, onStart }) => {
+        const o = await runHeadless({
+          steps: runModelSteps(a),
+          modelPath: a.model_path,
+          timeoutMs: (a.timeout_seconds ?? BACKGROUND_TIMEOUT_S) * 1000,
+          signal,
+          onStart,
+        });
+        return runModelOutcome(o, a);
+      });
+      return reply({
+        ok: true,
+        run_id: job.id,
+        run: job.label,
+        status: job.status,
+        next: "Call flexsim_get_run with this run_id to wait for the results.",
+      });
+    },
+  );
+
+  server.registerTool(
+    "flexsim_get_run",
+    {
+      title: "Check a background FlexSim run",
+      description: `Get the status of a run started with flexsim_start_run, and its full results once it has finished.
+Waits up to wait_seconds for the run to finish, so there is no need to pause between calls. If status is still queued or running, call again.
+Leave out run_id to list this server's recent runs.`,
+      inputSchema: z.strictObject({
+        run_id: z.string().min(1).optional().describe("The run_id from flexsim_start_run"),
+        wait_seconds: z.number().min(0).max(MAX_WAIT_S).default(30).describe(`Seconds to wait for the run to finish, up to ${MAX_WAIT_S}`),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ run_id, wait_seconds }, ctx) => {
+      if (!run_id) {
+        const runs = jobs.list().map((j) => {
+          const { run_id: id, run, status, elapsed_seconds } = describeJob(j);
+          return { run_id: id, run, status, elapsed_seconds };
+        });
+        return reply({ ok: true, runs });
       }
-      return reply(outcomePayload(o, extra), failed);
+      const job = jobs.get(run_id);
+      if (!job) {
+        return reply(
+          {
+            ok: false,
+            error: `No run with id ${run_id}. Runs are kept only while the server is running, and each Claude session can have its own server.`,
+          },
+          true,
+        );
+      }
+      await jobs.wait(job, wait_seconds * 1000, ctx.mcpReq.signal);
+      const described = describeJob(job);
+      if (!job.finishedAt) return reply({ ...described, next: "Still going. Call flexsim_get_run again." });
+      return reply(described, job.status === "failed");
+    },
+  );
+
+  server.registerTool(
+    "flexsim_cancel_run",
+    {
+      title: "Cancel a background FlexSim run",
+      description: "Stop a run started with flexsim_start_run, whether it is running or still queued. Its results are lost.",
+      inputSchema: z.strictObject({ run_id: z.string().min(1).describe("The run_id from flexsim_start_run") }),
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ run_id }, ctx) => {
+      const job = jobs.get(run_id);
+      if (!job) return reply({ ok: false, error: `No run with id ${run_id}.` }, true);
+      jobs.cancel(job);
+      await jobs.wait(job, 15000, ctx.mcpReq.signal);
+      return reply({ ...describeJob(job), ok: true });
     },
   );
 
@@ -270,6 +404,8 @@ Examples:
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
     async ({ script, model_path, timeout_seconds }, ctx) => {
+      const busy = busyReply();
+      if (busy) return busy;
       const o = await runHeadless({
         steps: [{ key: "result", code: script }],
         modelPath: model_path,
@@ -309,6 +445,8 @@ Examples:
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ model_path, table_name, max_rows, timeout_seconds }, ctx) => {
+      const busy = busyReply();
+      if (busy) return busy;
       const code = [
         // Table() on a missing name is not an error in FlexScript; it just looks empty.
         `if (!Tools.get("GlobalTable", ${fsLiteral(table_name)})) return 0;`,
@@ -434,3 +572,14 @@ Examples:
 
 serveStdio(createServer);
 console.error(`flexsim-mcp ${VERSION} running on stdio`);
+
+// A client closing the connection is the normal way this server ends. Don't leave FlexSim behind with
+// nothing watching it. A server killed outright can't do this, so a run in progress would finish alone.
+function shutDown(): void {
+  stopActiveRunSync();
+  process.exit(0);
+}
+process.stdin.on("end", shutDown);
+process.stdin.on("close", shutDown);
+process.on("SIGINT", shutDown);
+process.on("SIGTERM", shutDown);

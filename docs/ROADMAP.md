@@ -4,7 +4,8 @@ Ideas for future work, roughly in priority order. Open an issue before starting 
 
 ## Reliability
 
-- **Let runs outlast a single call.** Claude apps may stop waiting long before a simulation finishes, which also stops FlexSim. A start-and-check pair of tools, such as `flexsim_start_run` and `flexsim_get_run`, would fix this for every client. First measure the real limit in Chat, the Code tab, Cowork and the CLI.
+- **Keep background results across restarts.** Runs and their results live in the server's memory, so they're lost when it restarts. Measure the time limit in Chat, Cowork and the CLI too.
+- **Background scripts.** `flexsim_run_script` has no background form yet.
 - **Find out why the run after a force-stopped FlexSim fails.** The server retries once, but the cause is unknown, and the retry doesn't help if the server has restarted.
 - **Stop before the run when a parameter can't be applied.** Today the error comes after the simulation finishes, which wastes time on a long run. The wrapper could skip its remaining steps.
 - **Detect an ignored script quickly.** A marker written at the start of the wrapper would let the server fail within seconds if FlexSim never runs the script, rather than waiting for the time limit.

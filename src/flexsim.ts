@@ -1,7 +1,7 @@
 // FlexSim process runner: generates a FlexScript wrapper, launches flexsim.exe headless,
 // waits for the JSON result file, and cleans up the process and its temp files.
 // Author: Motasem Albanna
-import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -190,6 +190,8 @@ export interface RunOptions {
   modelPath?: string;
   timeoutMs: number;
   signal?: AbortSignal;
+  /** Called when this run leaves the queue and FlexSim is about to start. */
+  onStart?: () => void;
 }
 
 export interface RunOutcome {
@@ -285,6 +287,20 @@ function killTree(child: ChildProcess): void {
 // stopped run began. The cause is unknown, but an immediate second attempt works, so retry once.
 let lastRunForceStopped = false;
 
+let activeChild: ChildProcess | undefined;
+
+/** Stop any running FlexSim before this server exits, so a long run isn't left behind with nothing watching it. */
+export function stopActiveRunSync(): void {
+  const child = activeChild;
+  if (!child || child.pid === undefined || child.exitCode !== null) return;
+  if (process.platform === "win32") {
+    const taskkill = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
+    spawnSync(taskkill, ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+  } else {
+    child.kill("SIGKILL");
+  }
+}
+
 export function runHeadless(opts: RunOptions): Promise<RunOutcome> {
   return serialize(async () => {
     const mayRetry = lastRunForceStopped;
@@ -316,7 +332,8 @@ function failureMessage(reason: string, code: number | null, timeoutMs: number):
   );
 }
 
-async function runOnce({ steps, modelPath, timeoutMs, signal }: RunOptions): Promise<RunOutcome> {
+async function runOnce({ steps, modelPath, timeoutMs, signal, onStart }: RunOptions): Promise<RunOutcome> {
+  onStart?.();
   const started = Date.now();
   const { exe, source } = resolveExe();
   if (!exe) {
@@ -346,6 +363,10 @@ async function runOnce({ steps, modelPath, timeoutMs, signal }: RunOptions): Pro
     if (signal?.aborted) return { ok: false, durationMs: 0, exe, error: "The run was cancelled before it started." };
 
     const child = spawn(exe, flexsimArgs(model, scriptPath), spawnOptions(exe));
+    activeChild = child;
+    child.once("exit", () => {
+      if (activeChild === child) activeChild = undefined;
+    });
     const exit = await new Promise<{ code: number | null; reason: string }>((resolve) => {
       let settled = false;
       let stopReason: string | undefined;

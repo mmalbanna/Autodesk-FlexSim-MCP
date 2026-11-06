@@ -3,7 +3,7 @@
   "manifest_version": "0.3",
   "name": "flexsim-mcp",
   "display_name": "FlexSim MCP (unofficial)",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Unofficial. Run Autodesk FlexSim models from Claude without a window: what-if runs, parameters, performance measures, tables and FlexScript.",
   "long_description": "Unofficial community project, not affiliated with or endorsed by Autodesk. Requires your own licensed FlexSim install. Drives FlexSim through its command line (/maintenance nogui_disablemsg_runscript). Runs are queued one at a time and time-limited. The server never saves model files, but scripts you pass run with full FlexScript access.",
   "author": { "name": "Motasem Albanna", "url": "https://github.com/mmalbanna" },
@@ -28,6 +28,9 @@
   "tools": [
     { "name": "flexsim_check_installation", "description": "Find FlexSim installs and run a headless smoke test" },
     { "name": "flexsim_run_model", "description": "Run a model to a stop time with parameters and collect results" },
+    { "name": "flexsim_start_run", "description": "Start a long run in the background" },
+    { "name": "flexsim_get_run", "description": "Check a background run and collect its results" },
+    { "name": "flexsim_cancel_run", "description": "Stop a background run" },
     { "name": "flexsim_run_script", "description": "Run any FlexScript headless, optionally against a model" },
     { "name": "flexsim_read_table", "description": "Read a Global Table from a model" },
     { "name": "flexsim_list_models", "description": "Find .fsm model files in a folder" },

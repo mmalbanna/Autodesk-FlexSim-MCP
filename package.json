@@ -1,6 +1,6 @@
 {
   "name": "flexsim-mcp",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "MCP server that drives Autodesk FlexSim headless from Claude",
   "author": "Motasem Albanna",
   "license": "MIT",
@@ -11,7 +11,7 @@
   },
   "scripts": {
     "build": "tsc --noEmit && esbuild src/index.ts --bundle --platform=node --target=node20 --format=esm --outfile=bundle/server/index.mjs --banner:js=\"import { createRequire as __cr } from 'module'; const require = __cr(import.meta.url);\"",
-    "test": "node --test test/unit.test.mjs",
+    "test": "node --test test/unit.test.mjs test/jobs.test.mjs",
     "test:smoke": "node test/smoke.mjs",
     "test:flexsim": "node test/integration.mjs",
     "pack": "npm run build && node scripts/prepare-bundle.mjs && mcpb validate bundle/manifest.json && mcpb pack bundle dist/flexsim-mcp.mcpb"
