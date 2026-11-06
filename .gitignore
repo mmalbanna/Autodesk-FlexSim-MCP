@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.log
+
+# Build output. The manifest and icon in bundle/ are source files.
+bundle/server/
+bundle/LICENSE
+bundle/THIRD-PARTY-NOTICES.txt
+
+# Models and results are often confidential, so never commit them by accident.
+*.fsm
+*.fsx

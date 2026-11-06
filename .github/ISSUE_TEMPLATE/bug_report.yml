@@ -1,0 +1,63 @@
+name: Bug report
+description: Something doesn't work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check for private paths and model names before posting. Don't attach a model you can't share. For security problems, use [private reporting](../security/advisories/new) instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you asked for, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: smoke
+    attributes:
+      label: Smoke test output
+      description: Ask Claude to run the FlexSim smoke test (`flexsim_check_installation` with `smoke_test` true) and paste the result.
+      render: json
+  - type: input
+    id: flexsim
+    attributes:
+      label: FlexSim version
+      placeholder: FlexSim 2027
+    validations:
+      required: true
+  - type: input
+    id: server
+    attributes:
+      label: Server version
+      placeholder: 1.0.1
+    validations:
+      required: true
+  - type: dropdown
+    id: client
+    attributes:
+      label: Where are you using it?
+      options:
+        - Claude Desktop, Chat
+        - Claude Desktop, Code tab
+        - Claude Desktop, Cowork
+        - Claude Code CLI
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it?
+      options:
+        - Settings file
+        - Claude Desktop extension (.mcpb)
+        - Claude Code CLI
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows and Node.js versions
+      placeholder: Windows 11, Node.js 24

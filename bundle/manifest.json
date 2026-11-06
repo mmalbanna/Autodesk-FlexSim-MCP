@@ -1,0 +1,58 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/mcpb/main/schemas/mcpb-manifest-v0.3.schema.json",
+  "manifest_version": "0.3",
+  "name": "flexsim-mcp",
+  "display_name": "FlexSim MCP (unofficial)",
+  "version": "1.0.1",
+  "description": "Unofficial. Run Autodesk FlexSim models from Claude without a window: what-if runs, parameters, performance measures, tables and FlexScript.",
+  "long_description": "Unofficial community project, not affiliated with or endorsed by Autodesk. Requires your own licensed FlexSim install. Drives FlexSim through its command line (/maintenance nogui_disablemsg_runscript). Runs are queued one at a time and time-limited. The server never saves model files, but scripts you pass run with full FlexScript access.",
+  "author": { "name": "Motasem Albanna", "url": "https://github.com/mmalbanna" },
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/mmalbanna/Autodesk-FlexSim-MCP" },
+  "homepage": "https://github.com/mmalbanna/Autodesk-FlexSim-MCP",
+  "documentation": "https://github.com/mmalbanna/Autodesk-FlexSim-MCP#readme",
+  "support": "https://github.com/mmalbanna/Autodesk-FlexSim-MCP/issues",
+  "icon": "icon.png",
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.mjs"],
+      "env": {
+        "FLEXSIM_EXE": "${user_config.flexsim_exe}",
+        "FLEXSIM_TIMEOUT_SECONDS": "${user_config.timeout_seconds}"
+      }
+    }
+  },
+  "tools": [
+    { "name": "flexsim_check_installation", "description": "Find FlexSim installs and run a headless smoke test" },
+    { "name": "flexsim_run_model", "description": "Run a model to a stop time with parameters and collect results" },
+    { "name": "flexsim_run_script", "description": "Run any FlexScript headless, optionally against a model" },
+    { "name": "flexsim_read_table", "description": "Read a Global Table from a model" },
+    { "name": "flexsim_list_models", "description": "Find .fsm model files in a folder" },
+    { "name": "flexsim_open_in_gui", "description": "Open the FlexSim window with a model" }
+  ],
+  "user_config": {
+    "flexsim_exe": {
+      "type": "file",
+      "title": "FlexSim executable",
+      "description": "Optional. Leave empty to use the newest installed FlexSim. Set this only to choose a specific version or a custom install location.",
+      "required": false
+    },
+    "timeout_seconds": {
+      "type": "number",
+      "title": "Default run timeout (seconds)",
+      "description": "FlexSim is stopped if a run takes longer than this. Each call can override it.",
+      "default": 600,
+      "min": 30,
+      "max": 7200,
+      "required": false
+    }
+  },
+  "keywords": ["flexsim", "simulation", "autodesk", "digital twin"],
+  "compatibility": {
+    "platforms": ["win32"],
+    "runtimes": { "node": ">=20" }
+  }
+}

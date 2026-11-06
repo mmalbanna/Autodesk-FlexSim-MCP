@@ -1,0 +1,19 @@
+name: Feature request
+description: Suggest something new
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: Check the [roadmap](../blob/main/docs/ROADMAP.md) first. It may already be planned.
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do?
+      description: Describe the simulation task, rather than a specific solution.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How could this work?
+      description: Optional. Include any FlexScript that already does this, if you have some.

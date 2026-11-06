@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  # Installing dependencies and running build tools happens here, without a write token.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Check the tag matches the package version
+        run: |
+          version="$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).version")"
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "Tag $GITHUB_REF_NAME does not match package version $version"; exit 1; }
+      - run: npm run pack
+      - run: npm run test:smoke
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcpb
+          path: dist/flexsim-mcp.mcpb
+          if-no-files-found: error
+
+  # Only this job can write to the repository, and it runs none of the project's dependencies.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcpb
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" flexsim-mcp.mcpb \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Unofficial community project, not affiliated with or endorsed by Autodesk. See [CHANGELOG.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/CHANGELOG.md) for what changed, and the [README](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/README.md#install) for how to install."
