@@ -107,7 +107,7 @@ Leave `FLEXSIM_EXE` unset and the server moves to a new FlexSim version automati
 | Performance measures | Tested on a default measure only, not yet on one bound to live statistics |
 | Claude Code CLI | Connects |
 | Claude Desktop, Code tab | Works through the settings file |
-| Claude Desktop, Chat | Not yet verified. Anthropic documents that the settings file feeds it too. |
+| Claude Desktop, Chat | Smoke test passes through the settings file. Background runs not yet tried here. |
 | Claude Desktop extension install, Cowork | Not yet verified. Reports welcome. |
 
 ## Security
